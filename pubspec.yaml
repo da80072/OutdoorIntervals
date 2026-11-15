@@ -1,0 +1,21 @@
+name: outdoor_intervals
+description: OutdoorIntervals Flutter app for tracking outdoor workout intervals.
+publish_to: 'none'
+version: 1.0.0+1
+
+environment:
+  sdk: '>=3.0.0 <4.0.0'
+
+# GPX parsing dependency used by lib/services/gpx_parsing_service.dart.
+dependencies:
+  flutter:
+    sdk: flutter
+  xml: ^6.5.0
+
+ dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^3.0.0
+
+flutter:
+  uses-material-design: true
