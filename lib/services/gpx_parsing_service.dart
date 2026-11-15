@@ -2,12 +2,13 @@ import 'dart:math' as math;
 
 import 'package:xml/xml.dart';
 
-/// A point along a GPX track, with estimated power ranges for the route.
+/// One GPX track point and the estimated power ranges for the next route section.
 class RouteSegment {
   final double latitude;
   final double longitude;
   final double altitude;
   final double distance;
+  final double gradePercent;
   final ({double min, double max}) possiblePowerRange;
   final ({double min, double max}) recommendedPowerRange;
 
@@ -16,14 +17,18 @@ class RouteSegment {
     required this.longitude,
     required this.altitude,
     required this.distance,
+    required this.gradePercent,
     required this.possiblePowerRange,
     required this.recommendedPowerRange,
   });
 }
 
-/// Parses GPX track points and estimates power ranges from route grade.
+/// Parses GPX track points and estimates climbing/rolling power at a fixed speed.
+///
+/// This is a simplified estimate, not a measured power prediction: it does not
+/// account for wind, aerodynamic drag, drivetrain losses, or changing speed.
 class GpxParsingService {
-  static const double gravity = 9.81; // m/s²
+  static const double gravity = 9.81;
   static const double rollingResistanceCoeff = 0.005;
   static const double assumedSpeed = 3.0; // m/s
   static const double maximumHumanPower = 400.0; // W
@@ -36,8 +41,11 @@ class GpxParsingService {
     if (!systemWeightKg.isFinite || systemWeightKg <= 0) {
       throw ArgumentError.value(systemWeightKg, 'systemWeightKg', 'Must be positive and finite.');
     }
-    if (!targetZone.min.isFinite || !targetZone.max.isFinite || targetZone.min > targetZone.max) {
-      throw ArgumentError.value(targetZone, 'targetZone', 'Must be a finite range with min <= max.');
+    if (!targetZone.min.isFinite ||
+        !targetZone.max.isFinite ||
+        targetZone.min < 0 ||
+        targetZone.min > targetZone.max) {
+      throw ArgumentError.value(targetZone, 'targetZone', 'Must be a non-negative finite range with min <= max.');
     }
 
     final document = XmlDocument.parse(xmlString);
@@ -46,42 +54,47 @@ class GpxParsingService {
     var accumulatedDistance = 0.0;
 
     for (final point in trackPoints) {
-      final latitude = double.parse(point.getAttribute('lat')!);
-      final longitude = double.parse(point.getAttribute('lon')!);
-      final altitude = double.parse(point.findElements('ele').first.text);
+      final latitude = double.tryParse(point.getAttribute('lat') ?? '');
+      final longitude = double.tryParse(point.getAttribute('lon') ?? '');
+      final altitude = double.tryParse(point.findElements('ele').firstOrNull?.innerText ?? '0') ?? 0.0;
+      if (latitude == null || longitude == null ||
+          !latitude.isFinite || !longitude.isFinite ||
+          latitude.abs() > 90 || longitude.abs() > 180 || !altitude.isFinite) {
+        continue;
+      }
 
-      var slopeAngle = 0.0;
+      var gradePercent = 0.0;
       if (segments.isNotEmpty) {
         final previous = segments.last;
-        accumulatedDistance += calculateDistance(
+        final deltaDistance = calculateDistance(
           latitude,
           longitude,
           previous.latitude,
           previous.longitude,
         );
-        final distanceDelta = accumulatedDistance - previous.distance;
-        if (distanceDelta > 0) {
-          slopeAngle = math.atan((altitude - previous.altitude) / distanceDelta);
+        accumulatedDistance += deltaDistance;
+        if (deltaDistance > 0) {
+          gradePercent = ((altitude - previous.altitude) / deltaDistance) * 100;
         }
       }
 
+      final slopeAngle = math.atan(gradePercent / 100);
       final powerLimits = calculatePhysicalLimits(slopeAngle, systemWeightKg);
-      final recommendedRange = determineRecommendedRange(powerLimits, targetZone);
-
       segments.add(RouteSegment(
         latitude: latitude,
         longitude: longitude,
         altitude: altitude,
         distance: accumulatedDistance,
+        gradePercent: gradePercent,
         possiblePowerRange: powerLimits,
-        recommendedPowerRange: recommendedRange,
+        recommendedPowerRange: determineRecommendedRange(powerLimits, targetZone),
       ));
     }
 
     return segments;
   }
 
-  /// Returns the great-circle distance between two coordinates, in metres.
+  /// Great-circle distance between coordinates, in metres.
   double calculateDistance(double lat1, double lon1, double lat2, double lon2) {
     const radiansPerDegree = math.pi / 180;
     final latitudeDelta = (lat2 - lat1) * radiansPerDegree;
@@ -99,9 +112,7 @@ class GpxParsingService {
     final forceNormal = weightKg * gravity * math.cos(angle);
     final forceRolling = rollingResistanceCoeff * forceNormal;
     final minPower = math.max(0.0, (forceGravity + forceRolling) * assumedSpeed);
-    final maxPower = math.max(maximumHumanPower, minPower);
-
-    return (min: minPower, max: maxPower);
+    return (min: minPower, max: math.max(maximumHumanPower, minPower));
   }
 
   ({double min, double max}) determineRecommendedRange(
@@ -110,12 +121,7 @@ class GpxParsingService {
   ) {
     final effectiveMin = math.max(possibleLimits.min, targetZone.min);
     final effectiveMax = math.min(possibleLimits.max, targetZone.max);
-
-    // If the target zone is not physically achievable, use the physical range.
-    if (effectiveMin > effectiveMax) {
-      return possibleLimits;
-    }
-
+    if (effectiveMin > effectiveMax) return possibleLimits;
     return (min: effectiveMin, max: effectiveMax);
   }
 }
